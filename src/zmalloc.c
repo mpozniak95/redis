@@ -34,6 +34,42 @@ void zlibc_free(void *ptr) {
 #include "atomicvar.h"
 #include "redisassert.h"
 
+/* Intel x86-64 specific memory allocation optimizations */
+#if defined(__x86_64__) || defined(_M_X64)
+#include <xmmintrin.h>  /* For SSE prefetch instructions */
+
+/* Intel-specific memory alignment for optimal cache performance */
+#define INTEL_CACHE_LINE_SIZE 64
+#define INTEL_L1_CACHE_SIZE 32768
+#define INTEL_L2_CACHE_SIZE 262144
+
+/* Prefetch memory for Intel cache hierarchy */
+static inline void intel_prefetch_memory(void *ptr, size_t size) {
+    char *p = (char*)ptr;
+    char *end = p + size;
+    
+    /* Prefetch cache lines for Intel L1 cache */
+    while (p < end) {
+        _mm_prefetch(p, _MM_HINT_T0);  /* Prefetch to L1 cache */
+        p += INTEL_CACHE_LINE_SIZE;
+    }
+}
+
+/* Intel-optimized memory alignment */
+static inline size_t intel_align_size(size_t size) {
+    /* Align to Intel cache line boundaries for better performance */
+    if (size <= 64) return 64;
+    if (size <= 128) return 128;
+    if (size <= 256) return 256;
+    if (size <= 512) return 512;
+    if (size <= 1024) return 1024;
+    if (size <= 4096) return 4096;
+    
+    /* For larger allocations, align to page boundaries */
+    return (size + 4095) & ~4095;
+}
+#endif
+
 #define UNUSED(x) ((void)(x))
 
 #ifdef HAVE_MALLOC_SIZE
@@ -129,12 +165,27 @@ void *extend_to_usable(void *ptr, size_t size) {
 static inline void *ztrymalloc_usable_internal(size_t size, size_t *usable) {
     /* Possible overflow, return NULL, so that the caller can panic or handle a failed allocation. */
     if (size >= SIZE_MAX/2) return NULL;
-#ifdef HAVE_ALLOC_WITH_USIZE
-    void *ptr = malloc_with_usize(MALLOC_MIN_SIZE(size)+PREFIX_SIZE, &size);
+    
+    /* Intel x86-64 specific memory allocation optimizations */
+#if defined(__x86_64__) || defined(_M_X64)
+    size_t aligned_size = intel_align_size(size);
+    size_t total_size = MALLOC_MIN_SIZE(aligned_size) + PREFIX_SIZE;
 #else
-    void *ptr = malloc(MALLOC_MIN_SIZE(size)+PREFIX_SIZE);
+    size_t total_size = MALLOC_MIN_SIZE(size) + PREFIX_SIZE;
+#endif
+
+#ifdef HAVE_ALLOC_WITH_USIZE
+    void *ptr = malloc_with_usize(total_size, &size);
+#else
+    void *ptr = malloc(total_size);
 #endif
     if (!ptr) return NULL;
+
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Prefetch allocated memory for Intel cache optimization */
+    intel_prefetch_memory(ptr, total_size);
+#endif
+
 #ifdef HAVE_ALLOC_WITH_USIZE
     update_zmalloc_stat_alloc(size);
     if (usable) *usable = size;
@@ -145,7 +196,11 @@ static inline void *ztrymalloc_usable_internal(size_t size, size_t *usable) {
     if (usable) *usable = size;
     return ptr;
 #else
+#if defined(__x86_64__) || defined(_M_X64)
+    size = aligned_size;
+#else
     size = MALLOC_MIN_SIZE(size);
+#endif
     *((size_t*)ptr) = size;
     update_zmalloc_stat_alloc(size+PREFIX_SIZE);
     if (usable) *usable = size;
@@ -452,6 +507,22 @@ size_t zmalloc_usable_size(void *ptr) {
 
 void zfree(void *ptr) {
     if (ptr == NULL) return;
+
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Intel x86-64 optimization: Clear sensitive data and prefetch for deallocation */
+    size_t clear_size = 64; /* Clear first cache line for security */
+    
+#ifdef HAVE_MALLOC_SIZE
+    clear_size = zmalloc_size(ptr);
+    if (clear_size > 1024) clear_size = 64; /* Don't clear too much for large allocations */
+#endif
+    
+    /* Clear memory for security and cache efficiency on Intel */
+    memset(ptr, 0, clear_size);
+    
+    /* Prefetch for deallocation to improve allocator performance */
+    _mm_prefetch(ptr, _MM_HINT_NTA); /* Non-temporal prefetch */
+#endif
 
 #ifdef HAVE_ALLOC_WITH_USIZE
     size_t oldsize;
