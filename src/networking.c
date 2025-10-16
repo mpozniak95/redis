@@ -24,6 +24,12 @@
 #include <math.h>
 #include <ctype.h>
 
+/* Intel x86-64 specific networking optimizations */
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>  /* Intel intrinsics */
+#include <xmmintrin.h>  /* SSE prefetch */
+#endif
+
 static void setProtocolError(const char *errstr, client *c);
 static void pauseClientsByClient(mstime_t end, int isPauseClientAll);
 char *getClientSockname(client *c);
@@ -2082,6 +2088,13 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
  * to client. */
 static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
     *nwritten = 0;
+    
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Intel x86-64 optimization: Prefetch write buffers for better cache performance */
+    _mm_prefetch(c->buf, _MM_HINT_T0);      /* Prefetch buffer to L1 cache */
+    _mm_prefetch(c->reply, _MM_HINT_T0);    /* Prefetch reply list */
+#endif
+    
     /* When the reply list is not empty, it's better to use writev to save us some
      * system calls and TCP packets. */
     if (listLength(c->reply) > 0) {
@@ -2093,6 +2106,10 @@ static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
         if (listLength(c->reply) == 0)
             serverAssert(c->reply_bytes == 0);
     } else if (c->bufpos > 0) {
+#if defined(__x86_64__) || defined(_M_X64)
+        /* Intel optimization: Prefetch data being written for better cache performance */
+        _mm_prefetch(c->buf + c->sentlen, _MM_HINT_T0);
+#endif
         *nwritten = connWrite(c->conn, c->buf + c->sentlen, c->bufpos - c->sentlen);
         if (*nwritten <= 0) return C_ERR;
         c->sentlen += *nwritten;
@@ -2146,13 +2163,26 @@ static inline int _writeToClientSlave(client *c, ssize_t *nwritten) {
  * thread safe. */
 int writeToClient(client *c, int handler_installed) {
     if (!(c->io_flags & CLIENT_IO_WRITE_ENABLED)) return C_OK;
+    
+    /* Intel x86-64 optimization: Prefetch client structure for better cache performance */
+#if defined(__x86_64__) || defined(_M_X64)
+    _mm_prefetch(c, _MM_HINT_T0);           /* Prefetch client to L1 cache */
+    _mm_prefetch(c->conn, _MM_HINT_T0);     /* Prefetch connection structure */
+    _mm_prefetch(c->buf, _MM_HINT_T0);      /* Prefetch output buffer */
+#endif
+    
     /* Update the number of writes of io threads on server */
     atomicIncr(server.stat_io_writes_processed[c->running_tid], 1);
 
     ssize_t nwritten = 0, totwritten = 0;
     const int is_slave = clientTypeIsSlave(c);
 
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Intel optimization: Use branch prediction hints for slave check */
     if (unlikely(is_slave)) {
+#else
+    if (unlikely(is_slave)) {
+#endif
         /* We send as much as possible if the client is
          * a slave (otherwise, on high-speed traffic, the
          * replication buffer will grow indefinitely) */
@@ -2167,10 +2197,26 @@ int writeToClient(client *c, int handler_installed) {
          * it's because it's a MONITOR client, which are marked as replicas,
          * but exposed as normal clients */
         const int is_normal_client = !(c->flags & CLIENT_SLAVE);
+        
+#if defined(__x86_64__) || defined(_M_X64)
+        /* Intel optimization: Prefetch reply list for iteration */
+        if (c->reply && listLength(c->reply) > 0) {
+            _mm_prefetch(c->reply, _MM_HINT_T0);
+        }
+#endif
+        
         while (_clientHasPendingRepliesNonSlave(c)) {
             int ret = _writeToClientNonSlave(c, &nwritten);
             if (ret == C_ERR) break;
             totwritten += nwritten;
+            
+#if defined(__x86_64__) || defined(_M_X64)
+            /* Intel optimization: Enhanced condition with branch prediction */
+            if (__builtin_expect(totwritten > NET_MAX_WRITES_PER_EVENT &&
+                (server.maxmemory == 0 ||
+                zmalloc_used_memory() < server.maxmemory) &&
+                is_normal_client, 0)) break;
+#else
             /* Note that we avoid to send more than NET_MAX_WRITES_PER_EVENT
              * bytes, in a single threaded server it's a good idea to serve
              * other clients as well, even if a very large request comes from
@@ -2188,6 +2234,7 @@ int writeToClient(client *c, int handler_installed) {
                 (server.maxmemory == 0 ||
                 zmalloc_used_memory() < server.maxmemory) &&
                 is_normal_client) break;
+#endif
         }
         atomicIncr(server.stat_net_output_bytes, totwritten);
     }
