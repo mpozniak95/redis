@@ -10,6 +10,14 @@
 #include "server.h"
 #include "connhelpers.h"
 
+/* Network includes for TCP socket options */
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#ifdef __linux__
+#include <linux/tcp.h>
+#endif
+
 /* The connections module provides a lean abstraction of network connections
  * to avoid direct socket and async event management across the Redis code base.
  *
@@ -245,7 +253,7 @@ static int connSocketRead(connection *conn, void *buf, size_t buf_len) {
 
 #ifdef __x86_64__
     /* Intel optimization: Prefetch next buffer location for cache efficiency */
-    if (ret > 0 && ret < buf_len) {
+    if (ret > 0 && ret < (ssize_t)buf_len) {
         __builtin_prefetch((char*)buf + ret, 1, 3);
     }
 #endif
