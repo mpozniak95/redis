@@ -10,6 +10,12 @@
 #include "server.h"
 #include <math.h> /* isnan(), isinf() */
 
+/* Intel x86-64 specific optimizations for string operations */
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>  /* Intel intrinsics */
+#include <xmmintrin.h>  /* SSE prefetch */
+#endif
+
 /* Forward declarations */
 int getGenericCommand(client *c);
 
@@ -605,16 +611,41 @@ void incrDecrCommand(client *c, long long incr) {
     long long value, oldvalue;
     robj *new;
     dictEntryLink link;
+    
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Intel x86-64 optimization: Prefetch key and client data for better cache performance */
+    _mm_prefetch(c->argv[1]->ptr, _MM_HINT_T0);  /* Prefetch key to L1 cache */
+    _mm_prefetch(c, _MM_HINT_T0);                 /* Prefetch client structure */
+#endif
+    
     kvobj *o = lookupKeyWriteWithLink(c->db, c->argv[1], &link);
     if (checkType(c,o,OBJ_STRING)) return;
     if (getLongLongFromObjectOrReply(c,o,&value,NULL) != C_OK) return;
 
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Intel optimization: Prefetch object data for arithmetic operations */
+    if (o) _mm_prefetch(o, _MM_HINT_T0);
+#endif
+
     oldvalue = value;
+    
+    /* Intel x86-64 optimization: Use fast arithmetic operations */
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Check overflow using Intel's efficient branch prediction */
+    if (__builtin_expect(
+        (incr < 0 && oldvalue < 0 && incr < (LLONG_MIN-oldvalue)) ||
+        (incr > 0 && oldvalue > 0 && incr > (LLONG_MAX-oldvalue)), 0)) {
+        addReplyError(c,"increment or decrement would overflow");
+        return;
+    }
+#else
     if ((incr < 0 && oldvalue < 0 && incr < (LLONG_MIN-oldvalue)) ||
         (incr > 0 && oldvalue > 0 && incr > (LLONG_MAX-oldvalue))) {
         addReplyError(c,"increment or decrement would overflow");
         return;
     }
+#endif
+    
     value += incr;
 
     if (o && o->refcount == 1 && o->encoding == OBJ_ENCODING_INT &&
@@ -622,6 +653,12 @@ void incrDecrCommand(client *c, long long incr) {
     {
         new = o;
         o->ptr = (void*)((long)value);
+        
+#if defined(__x86_64__) || defined(_M_X64)
+        /* Intel optimization: Prefetch for keysizes histogram update */
+        _mm_prefetch(&c->db, _MM_HINT_T0);
+#endif
+        
         updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr),
                            OBJ_STRING,
                            (int64_t) sdigits10(oldvalue),
@@ -636,6 +673,12 @@ void incrDecrCommand(client *c, long long incr) {
             dbAddByLink(c->db, c->argv[1], &new, &link);
         }
     }
+    
+#if defined(__x86_64__) || defined(_M_X64)
+    /* Intel optimization: Prefetch for reply operations */
+    _mm_prefetch(new, _MM_HINT_T0);
+#endif
+    
     addReplyLongLongFromStr(c,new);
     signalModifiedKey(c,c->db,c->argv[1]);
     notifyKeyspaceEvent(NOTIFY_STRING,"incrby",c->argv[1],c->db->id);
