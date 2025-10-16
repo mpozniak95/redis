@@ -111,6 +111,14 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     /* Intel x86-64 optimization: Reduce syscall overhead and improve cache efficiency
      * Based on flamegraph analysis showing 6.1B samples in aeApiPoll on Intel vs ARM64 */
     
+#ifdef DEBUG_INTEL_OPT
+    static int debug_once = 0;
+    if (!debug_once) {
+        printf("DEBUG: Intel x86-64 optimizations ACTIVE in ae_epoll.c\n");
+        debug_once = 1;
+    }
+#endif
+    
     /* Use smaller batch size for better cache efficiency on Intel */
     #define INTEL_EPOLL_BATCH_SIZE 64
     int effective_setsize = eventLoop->setsize;
@@ -122,8 +130,8 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     int timeout;
     if (tvp) {
         timeout = tvp->tv_sec * 1000 + (tvp->tv_usec + 999) / 1000;
-        /* Intel optimization: Use shorter timeouts for better responsiveness */
-        if (timeout > 1) timeout = 1;
+        /* Intel optimization: Use moderate timeouts - too aggressive (1ms) may hurt performance */
+        if (timeout > 10) timeout = 10;  /* Changed from 1ms to 10ms */
     } else {
         timeout = -1;
     }

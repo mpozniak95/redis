@@ -9,8 +9,14 @@ make clean
 
 # Build with Intel-specific optimizations
 echo "Compiling with Intel-specific flags..."
+echo "Architecture detection:"
+echo "  - CPU: $(cat /proc/cpuinfo | grep 'model name' | head -1)"
+echo "  - Arch: $(uname -m)"
+echo "  - GCC: $(gcc --version | head -1)"
+echo ""
+
 make OPTIMIZATION="-O3 -march=native -mtune=intel -flto" \
-     CFLAGS="-D__INTEL_OPTIMIZED__ -msse4.2 -mavx2 -fno-omit-frame-pointer" \
+     CFLAGS="-D__INTEL_OPTIMIZED__ -msse4.2 -mavx2 -fno-omit-frame-pointer -DDEBUG_INTEL_OPT" \
      -j$(nproc)
 
 if [ $? -eq 0 ]; then
