@@ -44,7 +44,7 @@ if command -v numactl &> /dev/null; then
     numactl --hardware | grep "available:" 
     echo ""
     echo "To run Redis with NUMA optimization:"
-    echo "  numactl --cpunodebind=0 --membind=0 ./src/redis-server redis-intel-optimized.conf"
+    echo "  numactl --cpunodebind=0 --membind=0 ./src/redis-server redis-intel.conf"
 else
     echo "numactl not available - install with: sudo yum install numactl -y"
 fi
@@ -60,4 +60,4 @@ echo ""
 
 echo "=== ALL OPTIMIZATIONS APPLIED ==="
 echo "These settings are TEMPORARY and will revert after reboot."
-echo "Start Redis with: numactl --cpunodebind=0 --membind=0 ./src/redis-server redis-intel-optimized.conf"
+echo "Start Redis with: numactl --cpunodebind=0 --membind=0 ./src/redis-server redis-intel.conf"
