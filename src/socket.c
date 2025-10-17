@@ -2,7 +2,11 @@
  * Copyright (c) 2019-Present, Redis Ltd.
  * All rights reserved.
  *
- * Licensed under your choice of (a) the Redis Source Available License 2.0
+ * License    /* Intel x86-64 specific socket optimizations for better performance */
+#if defined(__x86_64__) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
+    int yes = 1;
+    /* TCP_NODELAY for immediate send - critical for Redis latency */
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));er your choice of (a) the Redis Source Available License 2.0
  * (RSALv2); or (b) the Server Side Public License v1 (SSPLv1); or (c) the
  * GNU Affero General Public License v3 (AGPLv3).
  */
@@ -85,7 +89,7 @@ static connection *connCreateAcceptedSocket(struct aeEventLoop *el, int fd, void
     conn->fd = fd;
     
     /* Intel x86-64 specific socket optimizations for accepted connections */
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     int yes = 1;
     /* TCP_NODELAY for immediate send - critical for Redis latency */
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
@@ -118,7 +122,7 @@ static int connSocketConnect(connection *conn, const char *addr, int port, const
     }
 
     /* Intel x86-64 specific socket optimizations for better performance */
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     int yes = 1;
     /* TCP_NODELAY for immediate send */
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));

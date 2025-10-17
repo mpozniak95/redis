@@ -107,7 +107,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     aeApiState *state = eventLoop->apidata;
     int retval, numevents = 0;
 
-#ifdef __x86_64__
+#if defined(__x86_64__) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Intel x86-64 optimization: Reduce syscall overhead and improve cache efficiency
      * Based on flamegraph analysis showing 6.1B samples in aeApiPoll on Intel vs ARM64 */
     
