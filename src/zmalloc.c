@@ -35,7 +35,7 @@ void zlibc_free(void *ptr) {
 #include "redisassert.h"
 
 /* Intel x86-64 specific memory allocation optimizations */
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
 #include <xmmintrin.h>  /* For SSE prefetch instructions */
 
 /* Intel-specific memory alignment for optimal cache performance */
@@ -167,7 +167,7 @@ static inline void *ztrymalloc_usable_internal(size_t size, size_t *usable) {
     if (size >= SIZE_MAX/2) return NULL;
     
     /* Intel x86-64 specific memory allocation optimizations */
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     size_t aligned_size = intel_align_size(size);
     size_t total_size = MALLOC_MIN_SIZE(aligned_size) + PREFIX_SIZE;
 #else
@@ -181,7 +181,7 @@ static inline void *ztrymalloc_usable_internal(size_t size, size_t *usable) {
 #endif
     if (!ptr) return NULL;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Prefetch allocated memory for Intel cache optimization */
     intel_prefetch_memory(ptr, total_size);
 #endif
@@ -196,7 +196,7 @@ static inline void *ztrymalloc_usable_internal(size_t size, size_t *usable) {
     if (usable) *usable = size;
     return ptr;
 #else
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     size = aligned_size;
 #else
     size = MALLOC_MIN_SIZE(size);
@@ -508,7 +508,7 @@ size_t zmalloc_usable_size(void *ptr) {
 void zfree(void *ptr) {
     if (ptr == NULL) return;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Intel x86-64 optimization: Clear sensitive data and prefetch for deallocation */
     size_t clear_size = 64; /* Clear first cache line for security */
     

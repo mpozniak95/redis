@@ -11,7 +11,7 @@
 #include <math.h> /* isnan(), isinf() */
 
 /* Intel x86-64 specific optimizations for string operations */
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
 #include <immintrin.h>  /* Intel intrinsics */
 #include <xmmintrin.h>  /* SSE prefetch */
 #endif
@@ -612,7 +612,7 @@ void incrDecrCommand(client *c, long long incr) {
     robj *new;
     dictEntryLink link;
     
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Intel x86-64 optimization: Prefetch key and client data for better cache performance */
     _mm_prefetch(c->argv[1]->ptr, _MM_HINT_T0);  /* Prefetch key to L1 cache */
     _mm_prefetch(c, _MM_HINT_T0);                 /* Prefetch client structure */
@@ -622,7 +622,7 @@ void incrDecrCommand(client *c, long long incr) {
     if (checkType(c,o,OBJ_STRING)) return;
     if (getLongLongFromObjectOrReply(c,o,&value,NULL) != C_OK) return;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Intel optimization: Prefetch object data for arithmetic operations */
     if (o) _mm_prefetch(o, _MM_HINT_T0);
 #endif
@@ -630,7 +630,7 @@ void incrDecrCommand(client *c, long long incr) {
     oldvalue = value;
     
     /* Intel x86-64 optimization: Use fast arithmetic operations */
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Check overflow using Intel's efficient branch prediction */
     if (__builtin_expect(
         (incr < 0 && oldvalue < 0 && incr < (LLONG_MIN-oldvalue)) ||
@@ -654,7 +654,7 @@ void incrDecrCommand(client *c, long long incr) {
         new = o;
         o->ptr = (void*)((long)value);
         
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
         /* Intel optimization: Prefetch for keysizes histogram update */
         _mm_prefetch(&c->db, _MM_HINT_T0);
 #endif
@@ -674,7 +674,7 @@ void incrDecrCommand(client *c, long long incr) {
         }
     }
     
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Intel optimization: Prefetch for reply operations */
     _mm_prefetch(new, _MM_HINT_T0);
 #endif

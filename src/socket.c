@@ -2,11 +2,7 @@
  * Copyright (c) 2019-Present, Redis Ltd.
  * All rights reserved.
  *
- * License    /* Intel x86-64 specific socket optimizations for better performance */
-#if defined(__x86_64__) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
-    int yes = 1;
-    /* TCP_NODELAY for immediate send - critical for Redis latency */
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));er your choice of (a) the Redis Source Available License 2.0
+ * Licensed under your choice of (a) the Redis Source Available License 2.0
  * (RSALv2); or (b) the Server Side Public License v1 (SSPLv1); or (c) the
  * GNU Affero General Public License v3 (AGPLv3).
  */
@@ -89,7 +85,7 @@ static connection *connCreateAcceptedSocket(struct aeEventLoop *el, int fd, void
     conn->fd = fd;
     
     /* Intel x86-64 specific socket optimizations for accepted connections */
-#if defined(__x86_64__) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     int yes = 1;
     /* TCP_NODELAY for immediate send - critical for Redis latency */
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
@@ -122,7 +118,7 @@ static int connSocketConnect(connection *conn, const char *addr, int port, const
     }
 
     /* Intel x86-64 specific socket optimizations for better performance */
-#if defined(__x86_64__) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     int yes = 1;
     /* TCP_NODELAY for immediate send */
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
@@ -183,7 +179,7 @@ static void connSocketClose(connection *conn) {
 }
 
 static int connSocketWrite(connection *conn, const void *data, size_t data_len) {
-#ifdef __x86_64__
+#if defined(__x86_64__) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Intel x86-64 optimization: Use writev for larger writes for better efficiency */
     if (data_len > 1024) {
         struct iovec iov = {.iov_base = (void*)data, .iov_len = data_len};
@@ -227,7 +223,7 @@ static int connSocketWritev(connection *conn, const struct iovec *iov, int iovcn
 }
 
 static int connSocketRead(connection *conn, void *buf, size_t buf_len) {
-#ifdef __x86_64__
+#if defined(__x86_64__) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Intel x86-64 optimization: Set TCP_NODELAY aggressively for lower latency
      * Based on flamegraph analysis showing Socket I/O 3x less efficient on Intel */
     static __thread int tcp_nodelay_set = 0;
@@ -252,7 +248,7 @@ static int connSocketRead(connection *conn, void *buf, size_t buf_len) {
             conn->state = CONN_STATE_ERROR;
     }
 
-#ifdef __x86_64__
+#if defined(__x86_64__) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Intel optimization: Prefetch next buffer location for cache efficiency */
     if (ret > 0 && ret < (ssize_t)buf_len) {
         __builtin_prefetch((char*)buf + ret, 1, 3);

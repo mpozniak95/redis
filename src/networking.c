@@ -25,7 +25,7 @@
 #include <ctype.h>
 
 /* Intel x86-64 specific networking optimizations */
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
 #include <immintrin.h>  /* Intel intrinsics */
 #include <xmmintrin.h>  /* SSE prefetch */
 #endif
@@ -2089,7 +2089,7 @@ static int _writevToClient(client *c, ssize_t *nwritten) {
 static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
     *nwritten = 0;
     
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Intel x86-64 optimization: Prefetch write buffers for better cache performance */
     _mm_prefetch(c->buf, _MM_HINT_T0);      /* Prefetch buffer to L1 cache */
     _mm_prefetch(c->reply, _MM_HINT_T0);    /* Prefetch reply list */
@@ -2106,7 +2106,7 @@ static inline int _writeToClientNonSlave(client *c, ssize_t *nwritten) {
         if (listLength(c->reply) == 0)
             serverAssert(c->reply_bytes == 0);
     } else if (c->bufpos > 0) {
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
         /* Intel optimization: Prefetch data being written for better cache performance */
         _mm_prefetch(c->buf + c->sentlen, _MM_HINT_T0);
 #endif
@@ -2165,7 +2165,7 @@ int writeToClient(client *c, int handler_installed) {
     if (!(c->io_flags & CLIENT_IO_WRITE_ENABLED)) return C_OK;
     
     /* Intel x86-64 optimization: Prefetch client structure for better cache performance */
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     _mm_prefetch(c, _MM_HINT_T0);           /* Prefetch client to L1 cache */
     _mm_prefetch(c->conn, _MM_HINT_T0);     /* Prefetch connection structure */
     _mm_prefetch(c->buf, _MM_HINT_T0);      /* Prefetch output buffer */
@@ -2177,7 +2177,7 @@ int writeToClient(client *c, int handler_installed) {
     ssize_t nwritten = 0, totwritten = 0;
     const int is_slave = clientTypeIsSlave(c);
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
     /* Intel optimization: Use branch prediction hints for slave check */
     if (unlikely(is_slave)) {
 #else
@@ -2198,7 +2198,7 @@ int writeToClient(client *c, int handler_installed) {
          * but exposed as normal clients */
         const int is_normal_client = !(c->flags & CLIENT_SLAVE);
         
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
         /* Intel optimization: Prefetch reply list for iteration */
         if (c->reply && listLength(c->reply) > 0) {
             _mm_prefetch(c->reply, _MM_HINT_T0);
@@ -2210,7 +2210,7 @@ int writeToClient(client *c, int handler_installed) {
             if (ret == C_ERR) break;
             totwritten += nwritten;
             
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && !defined(DISABLE_INTEL_OPTIMIZATIONS)
             /* Intel optimization: Enhanced condition with branch prediction */
             if (__builtin_expect(totwritten > NET_MAX_WRITES_PER_EVENT &&
                 (server.maxmemory == 0 ||
