@@ -24,6 +24,37 @@
 #include "redisassert.h"
 #include "util.h"
 
+/* AVX2 optimization for string comparison */
+#ifdef __AVX2__
+#include <immintrin.h>
+
+/* Optimized memcmp using AVX2 for comparisons >= 32 bytes.
+ * Returns 0 if equal, non-zero if different. */
+static inline int memcmp_avx2(const unsigned char *s1, const unsigned char *s2, size_t n) {
+    size_t i = 0;
+    
+    /* Process 32-byte chunks with AVX2 */
+    for (; i + 32 <= n; i += 32) {
+        __m256i v1 = _mm256_loadu_si256((const __m256i*)(s1 + i));
+        __m256i v2 = _mm256_loadu_si256((const __m256i*)(s2 + i));
+        __m256i cmp = _mm256_cmpeq_epi8(v1, v2);
+        int mask = _mm256_movemask_epi8(cmp);
+        
+        /* If mask is not all 1s (-1), there's a mismatch */
+        if (mask != -1) {
+            return 1; /* Not equal */
+        }
+    }
+    
+    /* Handle remaining bytes with standard memcmp */
+    if (i < n) {
+        return memcmp(s1 + i, s2 + i, n - i);
+    }
+    
+    return 0; /* Equal */
+}
+#endif
+
 #define LP_HDR_SIZE 6       /* 32 bit total len + 16 bit number of elements. */
 #define LP_HDR_NUMELE_UNKNOWN UINT16_MAX
 #define LP_MAX_INT_ENCODING_LEN 9
@@ -1712,7 +1743,8 @@ int lpValidateIntegrity(unsigned char *lp, size_t size, int deep,
 }
 
 /* Compare entry pointer to by 'p' with string 's' of length 'slen'.
- * Return 1 if equal. */
+ * Return 1 if equal. 
+ * AVX2-optimized version for large string comparisons. */
 unsigned int lpCompare(unsigned char *p, unsigned char *s, uint32_t slen,
                        long long *cached_longval, int *cached_valid) {
     unsigned char *value;
@@ -1721,8 +1753,19 @@ unsigned int lpCompare(unsigned char *p, unsigned char *s, uint32_t slen,
 
     value = lpGet(p, &sz, NULL);
     if (value) {
-        return (slen == sz) && memcmp(value,s,slen) == 0;
+        /* String comparison path */
+        if (slen != sz) return 0;
+        
+#ifdef __AVX2__
+        /* Use AVX2 optimization for strings >= 32 bytes */
+        if (slen >= 32) {
+            return memcmp_avx2(value, s, slen) == 0;
+        }
+#endif
+        /* For small strings or non-AVX2 systems, use standard memcmp */
+        return memcmp(value, s, slen) == 0;
     } else {
+        /* Integer comparison path */
         int64_t sval;
         /* We use lpStringToInt64() to get an integer representation of the
          * string 's' and compare it to 'sval', it's much faster than convert
