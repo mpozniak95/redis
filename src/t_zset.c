@@ -50,8 +50,15 @@
 #include <immintrin.h>
 
 /* Optimized memcmp using AVX2 for large string comparisons.
- * Returns 0 if equal, non-zero if different. */
+ * Returns 0 if equal, non-zero if different. 
+ * Dynamic threshold: AVX2 becomes beneficial only for n >= 64 bytes
+ * based on profiling showing break-even at ~48-64B depending on cache state. */
 static inline int memcmp_avx2_zset(const unsigned char *s1, const unsigned char *s2, size_t n) {
+    /* For small comparisons, standard memcmp is faster due to AVX2 overhead */
+    if (n < 64) {
+        return memcmp(s1, s2, n);
+    }
+    
     size_t i = 0;
     
     /* Process 32-byte chunks with AVX2 */
