@@ -49,33 +49,28 @@
 #ifdef __AVX2__
 #include <immintrin.h>
 
-/* Optimized memcmp using AVX2 for large string comparisons.
- * Returns 0 if equal, non-zero if different. 
- * Dynamic threshold: AVX2 becomes beneficial only for n >= 64 bytes
- * based on profiling showing break-even at ~48-64B depending on cache state. */
-static inline int memcmp_avx2_zset(const unsigned char *s1, const unsigned char *s2, size_t n) {
-    /* For small comparisons, standard memcmp is faster due to AVX2 overhead */
+/* Optimized memcmp using AVX-512 for large string comparisons.
+ * Uses 64-byte ZMM registers for maximum throughput on Granite Rapids.
+ * Returns proper memcmp-style result (0 if equal, <0 or >0 if different). */
+static inline int memcmp_avx512_zset(const unsigned char *s1, const unsigned char *s2, size_t n) {
+    /* For small comparisons, standard memcmp is faster due to AVX-512 overhead */
     if (n < 64) {
         return memcmp(s1, s2, n);
     }
     
     size_t i = 0;
     
-    /* Process 32-byte chunks with AVX2 */
-    for (; i + 32 <= n; i += 32) {
-        __m256i v1 = _mm256_loadu_si256((const __m256i*)(s1 + i));
-        __m256i v2 = _mm256_loadu_si256((const __m256i*)(s2 + i));
-        __m256i cmp = _mm256_cmpeq_epi8(v1, v2);
-        int mask = _mm256_movemask_epi8(cmp);
+    /* Process 64-byte chunks with AVX-512 */
+    for (; i + 64 <= n; i += 64) {
+        __m512i v1 = _mm512_loadu_si512((const __m512i*)(s1 + i));
+        __m512i v2 = _mm512_loadu_si512((const __m512i*)(s2 + i));
+        __mmask64 cmp_mask = _mm512_cmpeq_epi8_mask(v1, v2);
         
-        /* If mask is not all 1s (-1), there's a mismatch */
-        if (mask != -1) {
+        /* If mask is not all 1s, there's a mismatch */
+        if (cmp_mask != 0xFFFFFFFFFFFFFFFFULL) {
             /* Find the first differing byte for proper comparison result */
-            for (size_t j = i; j < i + 32 && j < n; j++) {
-                if (s1[j] != s2[j]) {
-                    return (int)s1[j] - (int)s2[j];
-                }
-            }
+            int pos = __builtin_ctzll(~cmp_mask);
+            return (int)s1[i + pos] - (int)s2[i + pos];
         }
     }
     
@@ -889,10 +884,10 @@ int zzlCompareElements(unsigned char *eptr, unsigned char *cstr, unsigned int cl
 
     minlen = (vlen < clen) ? vlen : clen;
     
-#ifdef __AVX2__
-    /* Use AVX2 optimization for strings >= 32 bytes */
-    if (minlen >= 32) {
-        cmp = memcmp_avx2_zset(vstr, cstr, minlen);
+#ifdef __AVX512F__
+    /* Use AVX-512 optimization for strings >= 64 bytes */
+    if (minlen >= 64) {
+        cmp = memcmp_avx512_zset(vstr, cstr, minlen);
     } else {
         cmp = memcmp(vstr, cstr, minlen);
     }

@@ -28,22 +28,21 @@
 #ifdef __AVX2__
 #include <immintrin.h>
 
-/* Optimized memcmp using AVX2 for comparisons >= 64 bytes.
- * Dynamic threshold based on profiling data showing break-even at ~48-64B.
- * Below this, setup cost and instruction overhead negate benefits.
+/* Optimized memcmp using AVX-512 for comparisons >= 64 bytes.
+ * Uses 64-byte ZMM registers for maximum throughput on Granite Rapids.
+ * Mask-based comparison avoids movemask overhead.
  * Returns 0 if equal, non-zero if different. */
-static inline int memcmp_avx2(const unsigned char *s1, const unsigned char *s2, size_t n) {
+static inline int memcmp_avx512(const unsigned char *s1, const unsigned char *s2, size_t n) {
     size_t i = 0;
     
-    /* Process 32-byte chunks with AVX2 */
-    for (; i + 32 <= n; i += 32) {
-        __m256i v1 = _mm256_loadu_si256((const __m256i*)(s1 + i));
-        __m256i v2 = _mm256_loadu_si256((const __m256i*)(s2 + i));
-        __m256i cmp = _mm256_cmpeq_epi8(v1, v2);
-        int mask = _mm256_movemask_epi8(cmp);
+    /* Process 64-byte chunks with AVX-512 */
+    for (; i + 64 <= n; i += 64) {
+        __m512i v1 = _mm512_loadu_si512((const __m512i*)(s1 + i));
+        __m512i v2 = _mm512_loadu_si512((const __m512i*)(s2 + i));
+        __mmask64 cmp_mask = _mm512_cmpeq_epi8_mask(v1, v2);
         
-        /* If mask is not all 1s (-1), there's a mismatch */
-        if (mask != -1) {
+        /* If mask is not all 1s (0xFFFFFFFFFFFFFFFF), there's a mismatch */
+        if (cmp_mask != 0xFFFFFFFFFFFFFFFFULL) {
             return 1; /* Not equal */
         }
     }
@@ -1758,16 +1757,15 @@ unsigned int lpCompare(unsigned char *p, unsigned char *s, uint32_t slen,
         /* String comparison path */
         if (slen != sz) return 0;
         
-#ifdef __AVX2__
-        /* Use AVX2 optimization for strings >= 64 bytes.
-         * Dynamic threshold: AVX2 becomes beneficial only for n >= 64 bytes
-         * based on profiling data showing break-even at ~48-64B range.
-         * Below this, setup cost and instruction overhead negate benefits. */
+#ifdef __AVX512F__
+        /* Use AVX-512 optimization for strings >= 64 bytes.
+         * AVX-512 with 64-byte ZMM registers provides better throughput
+         * on Granite Rapids and newer Xeon processors. */
         if (slen >= 64) {
-            return memcmp_avx2(value, s, slen) == 0;
+            return memcmp_avx512(value, s, slen) == 0;
         }
 #endif
-        /* For small strings or non-AVX2 systems, use standard memcmp */
+        /* For small strings or non-AVX512 systems, use standard memcmp */
         return memcmp(value, s, slen) == 0;
     } else {
         /* Integer comparison path */
