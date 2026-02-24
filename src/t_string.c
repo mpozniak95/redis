@@ -665,20 +665,136 @@ void getrangeCommand(client *c) {
 }
 
 void mgetCommand(client *c) {
-    int j;
+    int numkeys = c->argc - 1;
 
-    addReplyArrayLen(c,c->argc-1);
-    for (j = 1; j < c->argc; j++) {
-        kvobj *o = lookupKeyRead(c->db, c->argv[j]);
-        if (o == NULL) {
-            addReplyNull(c);
-        } else {
-            if (o->type != OBJ_STRING) {
+    addReplyArrayLen(c, numkeys);
+
+    /* Fast path for single key - no prefetching benefit. */
+    if (numkeys <= 1) {
+        if (numkeys == 1) {
+            kvobj *o = lookupKeyRead(c->db, c->argv[1]);
+            if (o == NULL || o->type != OBJ_STRING)
                 addReplyNull(c);
-            } else {
-                addReplyBulk(c,o);
+            else
+                addReplyBulk(c, o);
+        }
+        return;
+    }
+
+    /* Optimized multi-key path with batched dictionary prefetching.
+     *
+     * In a hash table lookup, the main bottleneck is random memory access: each
+     * key hashes to a different bucket, causing frequent L2/L3 cache misses
+     * (~40-200ns each). With many keys, these misses dominate latency.
+     *
+     * We process keys in batches with two-level prefetching:
+     *  Level 1: Compute key hashes, issue prefetch for hash bucket cache lines
+     *  Level 2: Read (now-cached) bucket pointers, prefetch dict entries/kvobjs
+     *  Level 3: Process keys via lookupKeyRead (data now in L1/L2 cache)
+     *
+     * Additionally, within Level 3 we use a sliding window to prefetch the
+     * value data (obj->ptr) for upcoming keys, hiding the cache miss that
+     * addReplyBulk would otherwise incur when accessing the string payload. */
+
+    /* In non-cluster mode slot is always 0. In cluster mode, MGET requires
+     * all keys in the same slot (enforced by the command table). */
+    int slot = server.cluster_enabled ? getKeySlot(c->argv[1]->ptr) : 0;
+    dict *d = kvstoreGetDict(c->db->keys, slot);
+
+    /* If dict doesn't exist or is empty, all lookups will miss.
+     * Still call lookupKeyRead for proper stats and keyspace notifications. */
+    if (!d || dictSize(d) == 0) {
+        for (int j = 1; j < c->argc; j++) {
+            lookupKeyRead(c->db, c->argv[j]);
+            addReplyNull(c);
+        }
+        return;
+    }
+
+    /* Batch size of 16 provides good balance: 16 SipHash computations give
+     * ~300-500 CPU cycles of overlap for cache miss resolution, enough to
+     * cover L3 (~40 cycles) and partial DRAM (~200 cycles) latency. */
+    #define MGET_BATCH 16
+    /* Distance ahead for value data prefetching within Level 3. */
+    #define MGET_VAL_PF_DIST 3
+
+    int j = 1;
+    int is_rehashing = dictIsRehashing(d);
+
+    while (j < c->argc) {
+        int batch_end = j + MGET_BATCH;
+        if (batch_end > c->argc) batch_end = c->argc;
+        int batch_size = batch_end - j;
+
+        /* Level 1: Compute hashes and prefetch bucket cache lines.
+         * Each hash computation takes ~20-30 CPU cycles (SipHash), so
+         * processing 16 keys gives the memory subsystem ~300-500 cycles
+         * to start fetching the randomly-accessed bucket data. */
+        uint64_t hashes[MGET_BATCH];
+        for (int k = 0; k < batch_size; k++) {
+            hashes[k] = dictGetHash(d, c->argv[j + k]->ptr);
+            uint64_t idx = hashes[k] & DICTHT_SIZE_MASK(d->ht_size_exp[0]);
+            redis_prefetch_read(&d->ht_table[0][idx]);
+            if (is_rehashing) {
+                uint64_t idx1 = hashes[k] & DICTHT_SIZE_MASK(d->ht_size_exp[1]);
+                redis_prefetch_read(&d->ht_table[1][idx1]);
             }
         }
+
+        /* Level 2: Bucket data should now be arriving in cache.
+         * Read bucket pointers and prefetch what they point to (either a
+         * dictEntry or a direct kvobj pointer in the no_value=1 dict).
+         * Tagged pointers are safe to prefetch — the tag bits are in the
+         * lowest 3 bits and won't shift the address to a different cache line
+         * (cache lines are 64-byte aligned). */
+        for (int k = 0; k < batch_size; k++) {
+            uint64_t idx = hashes[k] & DICTHT_SIZE_MASK(d->ht_size_exp[0]);
+            dictEntry *he = d->ht_table[0][idx];
+            if (he) {
+                redis_prefetch_read(he);
+            } else if (is_rehashing) {
+                uint64_t idx1 = hashes[k] & DICTHT_SIZE_MASK(d->ht_size_exp[1]);
+                he = d->ht_table[1][idx1];
+                if (he) redis_prefetch_read(he);
+            }
+        }
+
+        /* Level 3: Process keys with value data prefetching.
+         * Dict entries should be in cache from Level 2, significantly reducing
+         * the main source of latency. We also use a small sliding window to
+         * prefetch the value's string data (obj->ptr) for upcoming keys.
+         *
+         * The circular buffer is indexed by k % MGET_VAL_PF_DIST. Since
+         * reply_k = k - MGET_VAL_PF_DIST, both map to the same slot. We
+         * MUST read the reply first, then overwrite with the new lookup. */
+        kvobj *val_pf_buf[MGET_VAL_PF_DIST];
+        memset(val_pf_buf, 0, sizeof(val_pf_buf));
+        for (int k = 0; k < batch_size + MGET_VAL_PF_DIST; k++) {
+            /* Build reply for key that was looked up MGET_VAL_PF_DIST steps
+             * ago. Must be done BEFORE the lookup below, since both write to
+             * the same circular buffer slot. */
+            int reply_k = k - MGET_VAL_PF_DIST;
+            if (reply_k >= 0) {
+                kvobj *o = val_pf_buf[reply_k % MGET_VAL_PF_DIST];
+                if (o == NULL || o->type != OBJ_STRING) {
+                    addReplyNull(c);
+                } else {
+                    addReplyBulk(c, o);
+                }
+            }
+            /* Lookup upcoming key and prefetch its value data */
+            if (k < batch_size) {
+                kvobj *o = lookupKeyRead(c->db, c->argv[j + k]);
+                val_pf_buf[k % MGET_VAL_PF_DIST] = o;
+                /* Prefetch value data for RAW-encoded strings so the data is
+                 * in cache by the time addReplyBulk accesses it. */
+                if (o && o->type == OBJ_STRING && o->encoding == OBJ_ENCODING_RAW) {
+                    redis_prefetch_read(o->ptr);
+                }
+            }
+        }
+
+        j = batch_end;
     }
 }
 
