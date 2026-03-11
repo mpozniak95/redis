@@ -233,8 +233,10 @@ static inline void ctxPrefetchKvobj(DictPrefetchCtx *ctx, KeyPrefetchInfo *info)
 
     info->current_kv = kv;
     info->state = PREFETCH_VALDATA;
-    /* If the entry is a pointer of kv object, we don't need to prefetch it */
-    if (!is_kv) ctxPrefetchAndAdvance(ctx, kv);
+    if (!is_kv)
+        ctxPrefetchAndAdvance(ctx, kv); /* prefetch kv header + advance */
+    else
+        ctx->cur_idx = (ctx->cur_idx + 1) % ctx->key_count; /* advance only; kv IS the entry */
 }
 
 /* Prefetch the value data of the kv object found in dict entry. */
@@ -248,6 +250,11 @@ static void ctxPrefetchValdata(DictPrefetchCtx *ctx, KeyPrefetchInfo *info) {
     if ((!dictGetNext(info->current_entry) && !dictIsRehashing(ctx->dicts[i])) ||
         dictCompareKeys(ctx->dicts[i], ctx->keys[i], key))
     {
+        /* Prefetch the expiry slot (8 bytes before kv) if the key has a TTL.
+         * kv->metabits is already in cache; the prefetch is free to issue here
+         * and hides the latency while the state machine processes other keys. */
+        if (kv->metabits & KEY_META_MASK_EXPIRE)
+            redis_prefetch_read((uint64_t *)kv - 1);
         if (ctx->get_val_data) {
             void *value_data = ctx->get_val_data(kv);
             if (value_data) ctxPrefetchAndAdvance(ctx, value_data);
