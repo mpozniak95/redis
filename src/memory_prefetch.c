@@ -497,11 +497,13 @@ int addCommandToBatch(client *c) {
                 kvstoreGetDict(c->db->keys, pcmd->slot > 0 ? pcmd->slot : 0);
             batch->key_count++;
         }
-        /* Mark the command as prefetched only if ALL of its keys were
-         * added to the batch.  If the batch ran out of space mid-command,
-         * the remaining keys were not prefetched and the intra-command
-         * path (e.g. dictPrefetchKeys in mgetCommand) must handle them. */
-        if (batch->key_count - keys_before == (size_t)pcmd->keys_result.numkeys) {
+        /* Record how many keys were added to the batch for this command.
+         * If ALL keys fit, set the PREFETCHED flag so that intra-command
+         * prefetching can be skipped entirely.  Otherwise, the count lets
+         * the command skip the already-warm keys and prefetch only the rest. */
+        size_t keys_added = batch->key_count - keys_before;
+        pcmd->prefetched_keys_count = (int)keys_added;
+        if (keys_added == (size_t)pcmd->keys_result.numkeys) {
             pcmd->flags |= PENDING_CMD_KEYS_PREFETCHED;
         }
         pcmd = pcmd->next;

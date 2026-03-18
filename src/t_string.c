@@ -696,29 +696,36 @@ void mgetCommand(client *c) {
         return;
     }
 
-    /* Skip intra-command prefetching if the cross-command batch (I/O thread
-     * path or main-thread pipeline path) already prefetched our keys.
-     * Running both causes redundant work and measurable regressions with
-     * many I/O threads. */
-    int already_prefetched = c->current_pending_cmd &&
-        (c->current_pending_cmd->flags & PENDING_CMD_KEYS_PREFETCHED);
-
-    if (already_prefetched) {
-        /* Keys are already warm in cache — plain sequential lookups. */
-        for (int j = 1; j < c->argc; j++) {
-            kvobj *o = lookupKeyRead(c->db, c->argv[j]);
-            if (o == NULL || o->type != OBJ_STRING)
-                addReplyNull(c);
-            else
-                addReplyBulk(c, o);
+    /* Determine how many keys were already prefetched by the cross-command
+     * batch (I/O thread path or main-thread pipeline path). */
+    int skip_keys = 0;
+    if (c->current_pending_cmd) {
+        if (c->current_pending_cmd->flags & PENDING_CMD_KEYS_PREFETCHED) {
+            /* ALL keys prefetched — plain sequential lookups, no overhead. */
+            for (int j = 1; j < c->argc; j++) {
+                kvobj *o = lookupKeyRead(c->db, c->argv[j]);
+                if (o == NULL || o->type != OBJ_STRING)
+                    addReplyNull(c);
+                else
+                    addReplyBulk(c, o);
+            }
+            return;
         }
-        return;
+        skip_keys = c->current_pending_cmd->prefetched_keys_count;
     }
 
-    /* Process keys in batches, using the dict prefetch state machine to
-     * warm the cache for every batch before the sequential lookups. */
-    #define MGET_BATCH 16
+    /* Process keys already warm from cross-command batch (simple loop). */
     int j = 1;
+    for (int k = 0; k < skip_keys && j < c->argc; k++, j++) {
+        kvobj *o = lookupKeyRead(c->db, c->argv[j]);
+        if (o == NULL || o->type != OBJ_STRING)
+            addReplyNull(c);
+        else
+            addReplyBulk(c, o);
+    }
+
+    /* Intra-command prefetch for remaining (cold) keys only. */
+    #define MGET_BATCH 16
     while (j < c->argc) {
         int batch_end = j + MGET_BATCH;
         if (batch_end > c->argc) batch_end = c->argc;
