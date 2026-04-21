@@ -627,7 +627,7 @@ void setrangeCommand(client *c) {
         kv = dbUnshareStringValueByLink(c->db, c->argv[1], kv, link);
 
         newLen = max(oldLen, (int64_t) (offset + value_len));
-        updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_STRING, oldLen, newLen);            
+        updateKeysizesHist(c->db, OBJ_STRING, oldLen, newLen);            
     }
 
     if (value_len > 0) {
@@ -689,21 +689,108 @@ void getrangeCommand(client *c) {
 }
 
 void mgetCommand(client *c) {
-    int j;
+    int numkeys = c->argc - 1;
 
-    addReplyArrayLen(c,c->argc-1);
-    for (j = 1; j < c->argc; j++) {
-        kvobj *o = lookupKeyRead(c->db, c->argv[j]);
-        if (o == NULL) {
-            addReplyNull(c);
-        } else {
-            if (o->type != OBJ_STRING) {
+    addReplyArrayLen(c, numkeys);
+
+    /* For a single key (or zero), just do the plain lookup. */
+    if (numkeys <= 1) {
+        if (numkeys == 1) {
+            kvobj *o = lookupKeyRead(c->db, c->argv[1]);
+            if (o == NULL || o->type != OBJ_STRING)
                 addReplyNull(c);
-            } else {
-                addReplyBulk(c,o);
-            }
+            else
+                addReplyBulk(c, o);
         }
+        return;
     }
+
+    /* Determine the dict for the first key's slot (MGET requires all keys
+     * in the same slot in cluster mode). */
+    int slot = server.cluster_enabled ? getKeySlot(c->argv[1]->ptr) : 0;
+    dict *d = kvstoreGetDict(c->db->keys, slot);
+
+    /* If the dict is empty, reply NULLs but still call lookupKeyRead for
+     * side-effects (touch, stats, notifications). */
+    if (!d || dictSize(d) == 0) {
+        for (int j = 1; j < c->argc; j++) {
+            lookupKeyRead(c->db, c->argv[j]);
+            addReplyNull(c);
+        }
+        return;
+    }
+
+    /* Skip intra-command prefetching when the cross-command batch path
+     * already prefetched our keys (fully or partially).  Two conditions:
+     * 1. PENDING_CMD_KEYS_PREFETCHED: all keys fit in the batch — skip.
+     * 2. Pipeline active (ready_len > 1) AND batch prefetching is enabled:
+     *    batch ran with multiple commands, partially warming the hash table.
+     *    Running both prefetch paths causes cache-bandwidth contention and
+     *    -9.6% regression on x86 with pipeline-10.  The partial warmup is
+     *    sufficient.
+     * We must also verify that batch prefetching is enabled
+     * (prefetch_batch_max_size > 0), otherwise no cross-command prefetching
+     * occurred and the intra-command path is the only prefetch opportunity. */
+    int already_prefetched = c->current_pending_cmd &&
+        ((c->current_pending_cmd->flags & PENDING_CMD_KEYS_PREFETCHED) ||
+         (c->pending_cmds.ready_len > 1 && server.prefetch_batch_max_size > 0));
+
+    if (already_prefetched) {
+        /* Keys are already warm in cache — plain sequential lookups. */
+        for (int j = 1; j < c->argc; j++) {
+            kvobj *o = lookupKeyRead(c->db, c->argv[j]);
+            if (o == NULL || o->type != OBJ_STRING)
+                addReplyNull(c);
+            else
+                addReplyBulk(c, o);
+        }
+        return;
+    }
+
+    /* Process keys in batches, prefetching dict buckets before lookups. */
+    #define MGET_BATCH 16
+    #define MGET_LIGHT_PREFETCH_MAX 10
+    int j = 1;
+    while (j < c->argc) {
+        int batch_end = j + MGET_BATCH;
+        if (batch_end > c->argc) batch_end = c->argc;
+        int n = batch_end - j;
+
+        /* For small batches, use a lightweight bucket-only prefetch instead
+         * of the full state machine.  The state machine's per-key overhead
+         * (ctxNextInfo scan, function dispatch, 4 states per key) exceeds
+         * the prefetch benefit when keys are few and the working set fits
+         * in L3.  A single-pass bucket prefetch gives the CPU enough lead
+         * time to warm the hash chain heads without the iteration cost. */
+        if (n <= MGET_LIGHT_PREFETCH_MAX) {
+            int ht_idx = 0;
+            for (int k = 0; k < n; k++) {
+                uint64_t hash = dictGetHash(d, c->argv[j + k]->ptr);
+                uint64_t idx = hash & DICTHT_SIZE_MASK(d->ht_size_exp[ht_idx]);
+                redis_prefetch_read(&d->ht_table[ht_idx][idx]);
+            }
+        } else {
+            void *keys[MGET_BATCH];
+            dict  *dicts[MGET_BATCH];
+            for (int k = 0; k < n; k++) {
+                keys[k]  = c->argv[j + k]->ptr;
+                dicts[k] = d;
+            }
+            dictPrefetchKeys(dicts, keys, n, NULL);
+        }
+
+        /* Sequential lookups + replies — hot in cache. */
+        for (int k = 0; k < n; k++) {
+            kvobj *o = lookupKeyRead(c->db, c->argv[j + k]);
+            if (o == NULL || o->type != OBJ_STRING)
+                addReplyNull(c);
+            else
+                addReplyBulk(c, o);
+        }
+        j = batch_end;
+    }
+    #undef MGET_BATCH
+    #undef MGET_LIGHT_PREFETCH_MAX
 }
 
 void msetGenericCommand(client *c, int nx) {
@@ -844,8 +931,7 @@ void incrDecrCommand(client *c, long long incr) {
     {
         new = o;
         o->ptr = (void*)((long)value);
-        updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr),
-                           OBJ_STRING,
+        updateKeysizesHist(c->db, OBJ_STRING,
                            (int64_t) sdigits10(oldvalue),
                            (int64_t) sdigits10(value));
     } else {
@@ -958,7 +1044,7 @@ void appendCommand(client *c) {
             updateSlotAllocSize(c->db, getKeySlot(c->argv[1]->ptr), o, oldsize, kvobjAllocSize(o));
         totlen = sdslen(o->ptr);
         int64_t oldlen = totlen - append_len;
-        updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_STRING, oldlen, totlen);
+        updateKeysizesHist(c->db, OBJ_STRING, oldlen, totlen);
     }
     keyModified(c,c->db,c->argv[1],o,1);
     notifyKeyspaceEvent(NOTIFY_STRING,"append",c->argv[1],c->db->id);
