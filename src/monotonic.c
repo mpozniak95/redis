@@ -72,8 +72,30 @@ static char monotonic_info_string[32];
 
 static long mono_ticksPerMicrosecond = 0;
 
+/* Reciprocal of mono_ticksPerMicrosecond in Q64 fixed point, i.e.
+ * floor(2^64 / mono_ticksPerMicrosecond).  Set by monotonicInit_x86linux()
+ * once the tick rate is known.
+ *
+ * The tick rate is only discoverable at runtime, so dividing by it is a real
+ * 64-bit integer division -- the compiler cannot turn it into a reciprocal
+ * multiply the way it does for a compile-time constant.  That division is
+ * ~15-20 cycles on current x86 and the monotonic clock is read at least twice
+ * per command from call(), which is enough to show up in a profile once the
+ * network stops being the bottleneck.  Doing the reciprocal multiply by hand
+ * replaces it with a single 64x64->128 multiply keeping the high half (one
+ * `mulq`), which is 3-4 cycles and fully pipelined.
+ *
+ * Accuracy: writing d = 2^64 mod ticksPerUs, the result is short of the true
+ * quotient by tsc*d/(ticksPerUs*2^64) < tsc/2^64 microseconds.  Even at a TSC
+ * value of 2^60 (over a century at 3 GHz) that bound is under 0.07 us, so the
+ * multiply agrees with the division except when the exact quotient sits within
+ * that margin below an integer, where it can land 1 us lower.  The division
+ * already truncates to whole microseconds, so this does not change the
+ * resolution of any duration Redis reports. */
+static uint64_t mono_ticksPerUsReciprocal = 0;
+
 static monotime getMonotonicUs_x86(void) {
-    return __rdtsc() / mono_ticksPerMicrosecond;
+    return (monotime)(((__uint128_t)__rdtsc() * mono_ticksPerUsReciprocal) >> 64);
 }
 
 /* One calibration measurement: RDTSC ticks across a ~10ms nanosleep, bounded
@@ -246,6 +268,17 @@ static void monotonicInit_x86linux(void) {
         fprintf(stderr, "monotonic: x86 linux, unable to determine clock rate\n");
         return;
     }
+
+    /* A rate of 1 tick/us would make the Q64 reciprocal 2^64, which does not
+     * fit; no real x86_64 TSC runs at 1 MHz, so stay on the POSIX clock rather
+     * than carry a second code path for it. */
+    if (mono_ticksPerMicrosecond < 2) {
+        fprintf(stderr, "monotonic: x86 linux, implausible clock rate "
+                "(%ld ticks/us)\n", mono_ticksPerMicrosecond);
+        return;
+    }
+    mono_ticksPerUsReciprocal =
+        (uint64_t)((((__uint128_t)1) << 64) / (__uint128_t)mono_ticksPerMicrosecond);
 
     snprintf(monotonic_info_string, sizeof(monotonic_info_string),
             "X86 TSC @ %ld ticks/us", mono_ticksPerMicrosecond);
