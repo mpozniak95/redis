@@ -176,27 +176,43 @@ static int generate_digits(Fp *fp, Fp *upper, Fp *lower, char *digits, int *K) {
     uint64_t part2 = upper->frac & (one.frac - 1);
 
     int idx = 0, kappa = 10;
-    uint64_t *divp;
-    /* 1000000000 */
-    for (divp = tens + 10; kappa > 0; divp++) {
-        uint64_t div = *divp;
-        unsigned digit = part1 / div;
 
-        if (digit || idx) {
-            digits[idx++] = digit + '0';
-        }
+/* Unrolled form of the original loop over tens[10..19].  Each divisor is a
+ * compile-time constant, so the compiler strength-reduces part1 / div into a
+ * multiply-shift and no DIV instruction is emitted.  Arithmetic is otherwise
+ * byte-for-byte identical to the loop it replaces. */
+#define FPCONV_DIGIT_STEP(DIVISOR)                                            \
+    do {                                                                      \
+        const uint64_t div = (uint64_t)(DIVISOR);                             \
+        unsigned digit = (unsigned)(part1 / div);                             \
+                                                                              \
+        if (digit || idx) {                                                   \
+            digits[idx++] = digit + '0';                                      \
+        }                                                                     \
+                                                                              \
+        part1 -= digit * div;                                                 \
+        kappa--;                                                              \
+                                                                              \
+        uint64_t tmp = (part1 << -one.exp) + part2;                           \
+        if (tmp <= delta) {                                                   \
+            *K += kappa;                                                      \
+            round_digit(digits, idx, delta, tmp, div << -one.exp, wfrac);      \
+                                                                              \
+            return idx;                                                       \
+        }                                                                     \
+    } while (0)
 
-        part1 -= digit * div;
-        kappa--;
-
-        uint64_t tmp = (part1 << -one.exp) + part2;
-        if (tmp <= delta) {
-            *K += kappa;
-            round_digit(digits, idx, delta, tmp, div << -one.exp, wfrac);
-
-            return idx;
-        }
-    }
+    FPCONV_DIGIT_STEP(1000000000U);
+    FPCONV_DIGIT_STEP(100000000U);
+    FPCONV_DIGIT_STEP(10000000U);
+    FPCONV_DIGIT_STEP(1000000U);
+    FPCONV_DIGIT_STEP(100000U);
+    FPCONV_DIGIT_STEP(10000U);
+    FPCONV_DIGIT_STEP(1000U);
+    FPCONV_DIGIT_STEP(100U);
+    FPCONV_DIGIT_STEP(10U);
+    FPCONV_DIGIT_STEP(1U);
+#undef FPCONV_DIGIT_STEP
 
     /* 10 */
     uint64_t *unit = tens + 18;
