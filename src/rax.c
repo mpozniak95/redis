@@ -1862,15 +1862,33 @@ int raxIteratorNextStep(raxIterator *it, int noup) {
                 /* Try visiting the next child if there was at least one
                  * additional child. */
                 if (!it->node->iscompr && it->node->size > (old_noup ? 0 : 1)) {
-                    raxNode **cp = raxNodeFirstChildPtr(it->node);
-                    int i = 0;
-                    while (i < it->node->size) {
-                        debugf("SCAN NEXT %c\n", it->node->data[i]);
-                        if (it->node->data[i] > prevchild) break;
-                        i++;
-                        cp++;
+                    /* Children are sorted (see raxAddChild(), which inserts
+                     * in-place lexicographically), so locating the first child
+                     * greater than prevchild is an upper-bound search, not a
+                     * scan. The scan restarted from the first child on every
+                     * iteration step, so walking all N children of a node cost
+                     * O(N^2/2) comparisons. Checking the last child first
+                     * settles the most frequent case in O(1) -- during a
+                     * sequential walk the final step at every node discovers
+                     * "no greater child", which the scan only learned after
+                     * comparing all N -- the same trick raxLowWalk() already
+                     * uses for its child lookup. */
+                    int i;
+                    if (prevchild >= it->node->data[it->node->size-1]) {
+                        i = (int)it->node->size; /* No greater child. */
+                    } else {
+                        int lo = 0, hi = (int)it->node->size;
+                        while (lo < hi) {
+                            int mid = lo + (hi - lo) / 2;
+                            if (it->node->data[mid] > prevchild)
+                                hi = mid;
+                            else
+                                lo = mid + 1;
+                        }
+                        i = lo;
                     }
-                    if (i != it->node->size) {
+                    if (i != (int)it->node->size) {
+                        raxNode **cp = raxNodeFirstChildPtr(it->node) + i;
                         debugf("SCAN found a new node\n");
                         /* Fixed-length leaf inlining: at leaf depth slot `i`
                          * holds an inlined value, not a raxNode pointer.
@@ -1991,18 +2009,30 @@ int raxIteratorPrevStep(raxIterator *it, int noup) {
         /* Try visiting the prev child if there is at least one
          * child. */
         if (!it->node->iscompr && it->node->size > (old_noup ? 0 : 1)) {
-            raxNode **cp = raxNodeLastChildPtr(it->node);
-            int i = it->node->size-1;
-            while (i >= 0) {
-                debugf("SCAN PREV %c\n", it->node->data[i]);
-                if (it->node->data[i] < prevchild) break;
-                i--;
-                cp--;
+            /* Mirror of the upper-bound search in raxIteratorNextStep(): the
+             * children are sorted, so the last child smaller than prevchild is
+             * a lower-bound search minus one, and the backwards scan this
+             * replaces was quadratic in the node fan-out for the same reason. */
+            int i;
+            if (prevchild <= it->node->data[0]) {
+                i = -1; /* No smaller child. */
+            } else {
+                int lo = 0, hi = (int)it->node->size;
+                while (lo < hi) {
+                    int mid = lo + (hi - lo) / 2;
+                    if (it->node->data[mid] < prevchild)
+                        lo = mid + 1;
+                    else
+                        hi = mid;
+                }
+                i = lo-1;
             }
             /* If we found a new subtree to explore in this node,
              * go deeper following all the last children in order to
              * find the key lexicographically greater. */
             if (i != -1) {
+                raxNode **cp = raxNodeLastChildPtr(it->node) -
+                               ((int)it->node->size-1-i);
                 debugf("SCAN found a new node\n");
                 /* Fixed-length leaf inlining: at leaf depth slot `i`
                  * holds an inlined value, not a raxNode pointer.
