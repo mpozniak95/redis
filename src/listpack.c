@@ -2308,6 +2308,22 @@ static int lpFindCbCmp(const unsigned char *lp, unsigned char *p, void *user, un
     return 1;
 }
 
+/* lpFindCb() comparator for the reference-scan test: matches an entry against a
+ * (buf, len) string that may contain NUL bytes; integer entries compare against
+ * the string's integer value, as lpFind() does. */
+typedef struct { unsigned char *s; size_t len; } lpFindRefTarget;
+
+static int lpFindRefCmp(const unsigned char *lp, unsigned char *p, void *user, unsigned char *s, long long slen) {
+    UNUSED(lp);
+    UNUSED(p);
+    lpFindRefTarget *t = user;
+    if (!s) {
+        int64_t v;
+        return !(lpStringToInt64((const char *)t->s, t->len, &v) && v == slen);
+    }
+    return !((size_t)slen == t->len && memcmp(t->s, s, slen) == 0);
+}
+
 int listpackTest(int argc, char *argv[], int flags) {
     UNUSED(argc);
     UNUSED(argv);
@@ -3363,6 +3379,76 @@ int listpackTest(int argc, char *argv[], int flags) {
         assert(lpFindCb(lp, lpFirst(lp), "hello", lpFindCbCmp, 0) == NULL);
         assert(lpFindCb(lp, lpFirst(lp), "1024", lpFindCbCmp, 0) == NULL);
         lpFree(lp);
+    }
+
+    TEST("Test lpFind and lpFindCb against a reference scan") {
+        /* lpFindCbInternal() checks each new position with a cheap range test while
+         * it is more than 8 bytes before the end, and with lpAssertValidEntry()
+         * within the last 8 bytes. Look up present and absent values from every
+         * start position with skip 0..2, in listpacks mixing every encoding, so
+         * steps land on both sides of that boundary and on the final entry. The
+         * result must be the entry a plain lpNext() walk finds. */
+        static const long long intlim[] = {127, 4095, 32767, 8388607, 2147483647LL, LLONG_MAX};
+        int iters = accurate ? 2000 : 200;
+        char *buf = zmalloc(4600);
+        for (int it = 0; it < iters; it++) {
+            int n = 1 + rand() % 64;
+            lp = lpNew(0);
+            for (int i = 0; i < n; i++) {
+                int r = rand() % 10;
+                if (r < 6) {   /* 7-bit .. 64-bit integer encodings */
+                    long long v = (long long)((((unsigned long long)rand() << 32) | (unsigned)rand()) %
+                                              (unsigned long long)intlim[r]);
+                    if (rand() & 1) v = -v;
+                    lp = lpAppendInteger(lp, v);
+                } else {       /* 6-bit, 12-bit and 32-bit string encodings */
+                    int maxlen = r == 9 ? 4500 : (r == 8 ? 300 : 40);
+                    buf[0] = 's';   /* never parses as an integer */
+                    int len = 1 + randstring(buf + 1, 0, maxlen);
+                    lp = lpAppend(lp, (unsigned char *)buf, len);
+                }
+            }
+            assert(lpValidateIntegrity(lp, lpBytes(lp), 1, NULL, NULL) == 1);
+
+            /* Reference: pointer and string form of every entry. */
+            unsigned char **ptr = zmalloc(sizeof(unsigned char *) * n);
+            lpFindRefTarget *val = zmalloc(sizeof(lpFindRefTarget) * n);
+            unsigned char (*ibuf)[LP_INTBUF_SIZE] = zmalloc(LP_INTBUF_SIZE * n);
+            unsigned char *e = lpFirst(lp);
+            for (int i = 0; i < n; i++, e = lpNext(lp, e)) {
+                int64_t len;
+                ptr[i] = e;
+                val[i].s = lpGet(e, &len, ibuf[i]);
+                val[i].len = len;
+            }
+            assert(e == NULL);
+
+            char absent[32];
+            int alen = snprintf(absent, sizeof(absent), "absent:%d", it);
+            for (int start = 0; start < n; start++) {
+                for (unsigned int skip = 0; skip <= 2; skip++) {
+                    for (int k = 0; k < 4; k++) {
+                        lpFindRefTarget t;
+                        if (k == 3) { t.s = (unsigned char *)absent; t.len = alen; }
+                        else t = val[rand() % n];
+                        unsigned char *want = NULL;
+                        for (int i = start; i < n; i += skip + 1) {
+                            if (val[i].len == t.len && memcmp(val[i].s, t.s, t.len) == 0) {
+                                want = ptr[i];
+                                break;
+                            }
+                        }
+                        assert(lpFind(lp, ptr[start], t.s, t.len, skip) == want);
+                        assert(lpFindCb(lp, ptr[start], &t, lpFindRefCmp, skip) == want);
+                    }
+                }
+            }
+            zfree(ptr);
+            zfree(val);
+            zfree(ibuf);
+            lpFree(lp);
+        }
+        zfree(buf);
     }
 
     TEST("Test lpValidateIntegrity") {
