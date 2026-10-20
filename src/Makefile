@@ -561,6 +561,31 @@ bench: $(REDIS_BENCHMARK_NAME)
 gcov:
 	$(MAKE) REDIS_CFLAGS="-fprofile-arcs -ftest-coverage -fprofile-update=atomic -DCOVERAGE_TEST" REDIS_LDFLAGS="-fprofile-arcs -ftest-coverage"
 
+# Profile-guided optimization (GCC). Build an instrumented server with
+# 'make pgo-gen', run a representative workload against it and shut it down
+# cleanly (the profile is written at exit), then 'make pgo-use' rebuilds with
+# the profile. The changed flags trigger a full rebuild on their own. The
+# profile lives in PGO_DIR, which must be an absolute path because the
+# instrumented binary resolves it at run time; 'make clean' leaves it alone,
+# 'make pgo-clean' removes it. -fprofile-partial-training keeps code the
+# workload never reached optimized as in a regular build.
+PGO_DIR?=$(CURDIR)/pgo-data
+
+pgo-gen:
+	@$(if $(filter clang,$(CLANG)),echo "pgo-gen/pgo-use support GCC only" && exit 1,true)
+	$(MAKE) REDIS_CFLAGS="-fprofile-generate=$(PGO_DIR) -fprofile-update=atomic" REDIS_LDFLAGS="-fprofile-generate=$(PGO_DIR)"
+
+pgo-use:
+	@$(if $(filter clang,$(CLANG)),echo "pgo-gen/pgo-use support GCC only" && exit 1,true)
+	@test -n "$$(find $(PGO_DIR) -name '*.gcda' 2>/dev/null | head -1)" || \
+		(echo "No profile in $(PGO_DIR): run 'make pgo-gen' and a workload first" && exit 1)
+	$(MAKE) REDIS_CFLAGS="-fprofile-use=$(PGO_DIR) -fprofile-partial-training -Wno-missing-profile" REDIS_LDFLAGS="-fprofile-use=$(PGO_DIR)"
+
+pgo-clean:
+	rm -rf $(PGO_DIR)
+
+.PHONY: pgo-gen pgo-use pgo-clean
+
 noopt:
 	$(MAKE) OPTIMIZATION="-O0"
 
