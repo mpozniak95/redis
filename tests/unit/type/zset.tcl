@@ -3050,6 +3050,69 @@ start_server {tags {"zset"}} {
         set _ {}
     } {} {config:restore}
 
+    test {ZRANGESTORE of a whole B+ tree copies it in either direction} {
+        set old_entries [lindex [r config get zset-max-listpack-entries] 1]
+        r config set zset-max-listpack-entries 128
+        r del zsrc{t} zdst{t}
+        # Members around and above the 320 byte external-member size, and
+        # equal-score runs ordered by member.
+        set cmd [list r zadd zsrc{t}]
+        for {set j 0} {$j < 600} {incr j} {
+            set m [format "m:%04d" $j]
+            if {$j % 50 == 0} { append m [string repeat x [expr {300 + $j}]] }
+            lappend cmd [expr {($j * 7919) % 97}] $m
+        }
+        {*}$cmd
+        # Tombstones in the source member index.
+        for {set j 1} {$j < 600} {incr j 7} { r zrem zsrc{t} [format "m:%04d" $j] }
+        assert_encoding btree zsrc{t}
+        set n [r zcard zsrc{t}]
+        set want [r zrange zsrc{t} 0 -1 withscores]
+        r zadd zdst{t} 1 stale
+        foreach range [list {0 -1} {0 1000000} [list [expr {-$n}] [expr {$n-1}]] {-1000000 -1}] {
+            foreach dir {{} REV} {
+                assert_equal $n [r zrangestore zdst{t} zsrc{t} {*}$range {*}$dir]
+                assert_encoding btree zdst{t}
+                assert_equal $want [r zrange zdst{t} 0 -1 withscores]
+                assert_equal [r zrevrange zsrc{t} 0 -1 withscores] [r zrevrange zdst{t} 0 -1 withscores]
+                assert_equal [r zrangebyscore zsrc{t} 10 40 withscores] [r zrangebyscore zdst{t} 10 40 withscores]
+                foreach {m sc} $want {
+                    assert_equal $sc [r zscore zdst{t} $m]
+                }
+            }
+        }
+        # The copy is independent of its source.
+        set first [lindex $want 0]
+        r zadd zdst{t} -1 new
+        r zrem zdst{t} $first
+        r zincrby zsrc{t} 1000 $first
+        assert_equal {} [r zscore zsrc{t} new]
+        assert_equal {} [r zscore zdst{t} $first]
+        assert_equal $n [r zcard zdst{t}]
+        r zincrby zsrc{t} -1000 $first
+        assert_equal $want [r zrange zsrc{t} 0 -1 withscores]
+
+        # Destination is the source.
+        assert_equal $n [r zrangestore zsrc{t} zsrc{t} 0 -1 REV]
+        assert_equal $want [r zrange zsrc{t} 0 -1 withscores]
+        assert_encoding btree zsrc{t}
+
+        # A B+ tree that shrank below the listpack limit still stores into
+        # a listpack, as a partial range of it would. Drop the long members
+        # first, which would make any destination a B+ tree.
+        foreach m [r zrange zsrc{t} 0 -1] {
+            if {[string length $m] > 64} { r zrem zsrc{t} $m }
+        }
+        r zremrangebyrank zsrc{t} 10 -1
+        assert_encoding btree zsrc{t}
+        assert_equal 10 [r zrangestore zdst{t} zsrc{t} 0 -1]
+        assert_encoding listpack zdst{t}
+        assert_equal [r zrange zsrc{t} 0 -1 withscores] [r zrange zdst{t} 0 -1 withscores]
+
+        r del zsrc{t} zdst{t}
+        r config set zset-max-listpack-entries $old_entries
+    }
+
     test {ZRANGE invalid syntax} {
         catch {r zrange z1{t} 0 -1 limit 1 2} err
         assert_match "*syntax*" $err

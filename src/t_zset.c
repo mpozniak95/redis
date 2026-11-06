@@ -3897,6 +3897,21 @@ void genericZrangebyrankCommand(zrange_result_handler *handler,
     rangelen = (end-start)+1;
     result_cardinality = rangelen;
 
+    /* A store of every member is a copy, and the result is the same set in
+     * either direction. COPY duplicates a B+ tree as bytes (zsetDup() ->
+     * zbtreeDup() copies the leaves, the leaf ID table and the member index)
+     * instead of decoding, hashing and inserting each element again. Keep the
+     * encoding zrangeResultBeginStore() would choose: a B+ tree that shrank
+     * below the listpack limit still stores into a listpack. */
+    if (handler->dstkey && rangelen == llen &&
+        zobj->encoding == OBJ_ENCODING_BTREE &&
+        (size_t)rangelen > server.zset_max_listpack_entries)
+    {
+        handler->dstobj = zsetDup(zobj);
+        handler->finalizeResultEmission(handler, result_cardinality);
+        return;
+    }
+
     /* A REV range holds the same elements as the mirrored forward range.
      * ZRANGESTORE walks it forward when the destination will start as a
      * B+ tree (zrangeResultBeginStore() calls zsetTypeCreate() with this
